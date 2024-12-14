@@ -2,7 +2,7 @@ use csv::Reader;
 use ndarray::{Array2, Axis};
 use plotters::prelude::*;
 use std::error::Error;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::cmp::Ordering;
 
 // Custom wrapper for f64 to implement Ord
@@ -71,6 +71,22 @@ fn calculate_correlation(x: &ndarray::ArrayView1<f64>, y: &ndarray::ArrayView1<f
     } else {
         Some(numerator / denominator)
     }
+}
+
+fn calculate_correlation_matrix(data: &Array2<f64>) -> Array2<f64> {
+    let (rows, cols) = data.dim();
+    let mut correlation_matrix = Array2::zeros((cols, cols));
+
+    for i in 0..cols {
+        for j in 0..cols {
+            let col_i = data.column(i);
+            let col_j = data.column(j);
+            let correlation = calculate_correlation(&col_i.view(), &col_j.view()).unwrap_or(0.0);
+            correlation_matrix[(i, j)] = correlation;
+        }
+    }
+
+    correlation_matrix
 }
 
 fn find_top_countries(file_path: &str, happiness_index: usize) -> Result<(), Box<dyn Error>> {
@@ -181,7 +197,119 @@ fn create_scatter_plot(
     Ok(())
 }
 
+fn create_correlation_heatmap(
+    data: &Array2<f64>,
+    output_file: &str,
+) -> Result<(), Box<dyn Error>> {
+    let correlation_matrix = calculate_correlation_matrix(data);
+    let (rows, cols) = correlation_matrix.dim();
 
+    // Check if the matrix is square
+    if rows != cols {
+        return Err("Correlation matrix is not square.".into());
+    }
+
+    let root = BitMapBackend::new(output_file, (1024, 768)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Correlation Heatmap", ("sans-serif", 30))
+        .margin(20)
+        .x_label_area_size(30)
+        .y_label_area_size(30)
+        .build_cartesian_2d(0..cols as u32, 0..rows as u32)?;
+
+    chart.configure_mesh().disable_mesh().draw()?;
+
+    // Draw heatmap cells
+    for i in 0..rows {
+        for j in 0..cols {
+            let value = correlation_matrix[(i, j)];
+            let color = if value >= 0.0 {
+                RGBColor((255.0 * (1.0 - value)) as u8, (255.0 * value) as u8, 0)
+            } else {
+                RGBColor(0, (255.0 * (1.0 + value)) as u8, (255.0 * (-value)) as u8)
+            };
+            chart.draw_series(std::iter::once(Rectangle::new(
+                [(j as u32, i as u32), (j as u32 + 1, i as u32 + 1)],
+                color.filled(),
+            )))?;
+        }
+    }
+
+    println!("Heatmap saved to {}", output_file);
+    Ok(())
+}
+fn euclidean_distance(x: &[f64], y: &[f64]) -> f64 {
+    x.iter()
+        .zip(y.iter())
+        .map(|(xi, yi)| (xi - yi).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Create a similarity graph based on a distance threshold
+fn create_similarity_graph(data: &Array2<f64>, threshold: f64) -> HashMap<usize, Vec<usize>> {
+    let mut graph: HashMap<usize, Vec<usize>> = HashMap::new();
+    let rows = data.shape()[0];
+
+    for i in 0..rows {
+        for j in i + 1..rows {
+            let dist = euclidean_distance(&data.row(i).to_vec(), &data.row(j).to_vec());
+            if dist <= threshold {
+                graph.entry(i).or_insert_with(Vec::new).push(j);
+                graph.entry(j).or_insert_with(Vec::new).push(i);
+            }
+        }
+    }
+    graph
+}
+
+/// Use BFS to find connected components (clusters)
+fn bfs_connected_components(graph: &HashMap<usize, Vec<usize>>) -> Vec<HashSet<usize>> {
+    let mut visited = HashSet::new();
+    let mut clusters = Vec::new();
+
+    for &node in graph.keys() {
+        if !visited.contains(&node) {
+            let mut cluster = HashSet::new();
+            let mut queue = VecDeque::new();
+
+            queue.push_back(node);
+            while let Some(current) = queue.pop_front() {
+                if visited.insert(current) {
+                    cluster.insert(current);
+                    if let Some(neighbors) = graph.get(&current) {
+                        for &neighbor in neighbors {
+                            if !visited.contains(&neighbor) {
+                                queue.push_back(neighbor);
+                            }
+                        }
+                    }
+                }
+            }
+
+            clusters.push(cluster);
+        }
+    }
+    clusters
+}
+
+/// Analyze connectedness using BFS and clustering
+fn analyze_connectedness(data: &Array2<f64>, threshold: f64) -> Vec<HashSet<usize>> {
+    // Create a similarity graph
+    let graph = create_similarity_graph(data, threshold);
+
+    // Find connected components using BFS
+    let clusters = bfs_connected_components(&graph);
+
+    println!("Number of clusters found: {}", clusters.len());
+    for (i, cluster) in clusters.iter().enumerate() {
+        println!("Cluster {}: {} countries", i + 1, cluster.len());
+    }
+
+    clusters
+}
 fn main() -> Result<(), Box<dyn Error>> {
     let file_2015 = "./archive/2015.csv";
     let file_2016 = "./archive/2016.csv";
@@ -225,6 +353,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Generate scatter plot
     create_scatter_plot(file_2015, file_2016, trust_index, happiness_index, "trust_vs_happiness.png")?;
 
+    let labels = vec![
+        "Economy", "Family", "Health", "Freedom", "Trust", "Generosity", "Dystopia Residual"
+    ];
 
+    create_correlation_heatmap(&data_2015, "correlation_heatmap_2015.png")?;
+    create_correlation_heatmap(&data_2016, "correlation_heatmap_2016.png")?;
+
+    // BFS
+    let threshold = 0.5; // Define similarity threshold
+
+    // Load dataset as a 2D array
+    let data_one = load_csv_to_array(file_2015)?;
+    let data_two = load_csv_to_array(file_2016)?;
+
+    // Analyze connectedness
+    println!("Analysis for 2015 dataset:");
+    let clusters_one = analyze_connectedness(&data_one, threshold);
+    println!("Analysis for 2016 dataset:");
+    let clusters_two = analyze_connectedness(&data_two, threshold);
     Ok(())
 }
+
