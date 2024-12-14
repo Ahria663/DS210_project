@@ -8,6 +8,7 @@ csv = "1.1"
 ndarray = "0.16.1"
 ndarray-csv = "0.5.3"
 ndarray-stats = "0.6.0"
+ordered-float = "4.5.0"
 plotters = "0.3.1"
 petgraph = "0.6"
 serde = { version = "1.0", features = ["derive"] }

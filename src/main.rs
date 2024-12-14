@@ -1,82 +1,125 @@
+use ordered_float::NotNan;
+use std::cmp::Reverse;
 use csv::Reader;
-use ndarray::{Array2, Axis};
+use ndarray::{Array2};
 use plotters::prelude::*;
 use std::error::Error;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
-use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
+use std::f64;
+use petgraph::graph::{Graph, NodeIndex};
+use petgraph::visit::Walker;
 
-// Custom wrapper for f64 to implement Ord
-#[derive(Debug)]
-struct FloatOrd(f64);
-
-impl PartialEq for FloatOrd {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Eq for FloatOrd {}
-
-impl PartialOrd for FloatOrd {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.0.partial_cmp(&other.0)
-    }
-}
-
-impl Ord for FloatOrd {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
+// Load and Clean Data
 fn load_csv_to_array(file_path: &str) -> Result<Array2<f64>, Box<dyn Error>> {
     let mut reader = Reader::from_path(file_path)?;
-
-    // Collect data as a vector of rows
     let mut data = Vec::new();
 
+    let mut max_cols = 0;
     for record in reader.records() {
         let record = record?;
         let row: Vec<f64> = record
             .iter()
-            .skip(3) // Skip the first three columns (e.g., Country, Region, Rank)
-            .map(|value| value.parse::<f64>().unwrap_or(0.0))
+            .filter_map(|value| value.parse::<f64>().ok())
             .collect();
+        max_cols = max_cols.max(row.len());
         data.push(row);
     }
 
-    // Convert to a 2D array
+    // Pad rows to the same length
+    for row in &mut data {
+        row.resize(max_cols, f64::NAN); // Fill with NaN for missing values
+    }
+
     let rows = data.len();
-    let cols = data[0].len();
+    let cols = max_cols;
     let flat_data: Vec<f64> = data.into_iter().flatten().collect();
     Ok(Array2::from_shape_vec((rows, cols), flat_data)?)
 }
 
-fn calculate_correlation(x: &ndarray::ArrayView1<f64>, y: &ndarray::ArrayView1<f64>) -> Option<f64> {
-    if x.len() != y.len() {
-        return None;
+// Statistics
+// Chi-square
+
+
+// EDA
+fn find_top_countries(file_path: &str, country_column: usize, year_column: usize, life_expectancy_column: usize) -> Result<(), Box<dyn Error>> {
+    let mut reader = Reader::from_path(file_path)?;
+
+    let mut year_data: HashMap<String, BinaryHeap<Reverse<(NotNan<f64>, String)>>> = HashMap::new();
+
+    for result in reader.records() {
+        let record = result?;
+        let country = record.get(country_column).unwrap_or("").to_string();
+        let year = record.get(year_column).unwrap_or("").to_string();
+        let life_expectancy = record
+            .get(life_expectancy_column)
+            .unwrap_or("0")
+            .parse::<f64>()
+            .ok()
+            .and_then(|val| NotNan::new(val).ok())
+            .unwrap_or_else(|| NotNan::new(0.0).unwrap());
+
+        year_data
+            .entry(year.clone())
+            .or_insert_with(BinaryHeap::new)
+            .push(Reverse((life_expectancy, country)));
     }
 
-    let x_mean = x.mean().unwrap_or(0.0);
-    let y_mean = y.mean().unwrap_or(0.0);
+    for (year, mut heap) in year_data {
+        println!("Top 5 countries in year {}:", year);
+        let mut top_countries = Vec::new();
+        while let Some(Reverse((life_expectancy, country))) = heap.pop() {
+            top_countries.push((country, life_expectancy));
+            if top_countries.len() == 5 {
+                break;
+            }
+        }
 
-    let numerator: f64 = x.iter().zip(y.iter()).map(|(&xi, &yi)| (xi - x_mean) * (yi - y_mean)).sum();
-    let x_variance: f64 = x.iter().map(|&xi| (xi - x_mean).powi(2)).sum();
-    let y_variance: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
-
-    let denominator = (x_variance * y_variance).sqrt();
-
-    if denominator == 0.0 {
-        None
-    } else {
-        Some(numerator / denominator)
+        for (country, life_expectancy) in top_countries {
+            println!("{}: {:.2}", country, life_expectancy);
+        }
+        println!();
     }
+
+    Ok(())
 }
 
-fn calculate_correlation_matrix(data: &Array2<f64>) -> Array2<f64> {
-    let (rows, cols) = data.dim();
-    let mut correlation_matrix = Array2::zeros((cols, cols));
+// Calculate the correlation between two variables
+fn create_correlation_heatmap(
+    file_path: &str,
+    output_file: &str,
+    exclude_columns: &[usize], // Columns to exclude (e.g., Year, Country)
+    feature_names: &[String],  // Names of all columns (for labeling the heatmap)
+) -> Result<(), Box<dyn Error>> {
+    // Load CSV data
+    let mut reader = csv::Reader::from_path(file_path)?;
+    // let headers = reader.headers()?.clone();
 
+    // Parse the data into a matrix
+    let mut data_matrix: Vec<Vec<f64>> = Vec::new();
+    for record in reader.records() {
+        let record = record?;
+        let row: Vec<f64> = record
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !exclude_columns.contains(i)) // Exclude specific columns
+            .map(|(_, value)| value.parse::<f64>().unwrap_or(0.0)) // Parse as f64, default to 0.0
+            .collect();
+        data_matrix.push(row);
+    }
+
+    // Convert to ndarray for processing
+    let data = Array2::from_shape_vec(
+        (data_matrix.len(), data_matrix[0].len()),
+        data_matrix.into_iter().flatten().collect(),
+    )?;
+
+    let (_, cols) = data.dim();
+    if cols == 0 {
+        return Err("No columns to process".into());
+    }
+
+    // Calculate the correlation matrix
+    let mut correlation_matrix = Array2::zeros((cols, cols));
     for i in 0..cols {
         for j in 0..cols {
             let col_i = data.column(i);
@@ -86,143 +129,44 @@ fn calculate_correlation_matrix(data: &Array2<f64>) -> Array2<f64> {
         }
     }
 
-    correlation_matrix
-}
-
-fn find_top_countries(file_path: &str, happiness_index: usize) -> Result<(), Box<dyn Error>> {
-    let mut reader = Reader::from_path(file_path)?;
-
-    // Read headers and ensure country column exists
-    let headers = reader.headers()?.clone();
-    let country_column = 0; // Assuming country is in the first column
-
-    // Collect data with country names and happiness scores
-    let mut country_scores = Vec::new();
-
-    for record in reader.records() {
-        let record = record?;
-        let country = record.get(country_column).unwrap_or("").to_string();
-        let happiness_score: f64 = record.get(happiness_index).unwrap_or("0").parse().unwrap_or(0.0);
-        country_scores.push((FloatOrd(happiness_score), country));
-    }
-
-    // Find top 5 countries using a binary heap
-    let mut heap = BinaryHeap::new();
-
-    for (score, country) in country_scores {
-        heap.push((score, country));
-        if heap.len() > 5 {
-            heap.pop();
-        }
-    }
-
-    // Extract top 5 countries
-    let mut top_countries = Vec::new();
-    while let Some(entry) = heap.pop() {
-        top_countries.push(entry);
-    }
-
-    top_countries.reverse(); // Reverse to show highest scores first
-    println!("Top 5 countries in {}:", file_path);
-    for (FloatOrd(score), country) in top_countries {
-        println!("{}: {:.2}", country, score);
-    }
-
-    Ok(())
-}
-
-fn create_scatter_plot(
-    file_2015: &str,
-    file_2016: &str,
-    trust_index: usize,
-    happiness_index: usize,
-    output_file: &str,
-) -> Result<(), Box<dyn Error>> {
-    let mut reader_2015 = Reader::from_path(file_2015)?;
-    let mut reader_2016 = Reader::from_path(file_2016)?;
-
-    let mut trust_scores_2015 = vec![];
-    let mut happiness_scores_2015 = vec![];
-    let mut trust_scores_2016 = vec![];
-    let mut happiness_scores_2016 = vec![];
-
-    for record in reader_2015.records() {
-        let record = record?;
-        let trust: f64 = record.get(trust_index).unwrap_or("0").parse().unwrap_or(0.0);
-        let happiness: f64 = record.get(happiness_index).unwrap_or("0").parse().unwrap_or(0.0);
-        trust_scores_2015.push(trust);
-        happiness_scores_2015.push(happiness);
-    }
-
-    for record in reader_2016.records() {
-        let record = record?;
-        let trust: f64 = record.get(trust_index).unwrap_or("0").parse().unwrap_or(0.0);
-        let happiness: f64 = record.get(happiness_index).unwrap_or("0").parse().unwrap_or(0.0);
-        trust_scores_2016.push(trust);
-        happiness_scores_2016.push(happiness);
-    }
-
-    let root = BitMapBackend::new(output_file, (1024, 768)).into_drawing_area();
+    // Set up the drawing area
+    let root = BitMapBackend::new(output_file, (1024, 1024)).into_drawing_area();
     root.fill(&WHITE)?;
-    let mut chart = ChartBuilder::on(&root)
-        .caption("Trust in Government vs Happiness Score (2015 & 2016)", ("sans-serif", 30))
-        .margin(20)
-        .x_label_area_size(30)
-        .y_label_area_size(30)
-        .build_cartesian_2d(0.0..2.0, 0.0..8.0)?;
 
-    chart.configure_mesh()
-        .x_desc("Trust in Government")
-        .y_desc("Happiness Score")
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Feature Correlation Heatmap", ("sans-serif", 30))
+        .margin(5)
+        .x_label_area_size(60)
+        .y_label_area_size(60)
+        .build_cartesian_2d(0..cols as u32, 0..cols as u32)?;
+
+    chart
+        .configure_mesh()
+        .disable_mesh()
+        .x_labels(cols)
+        .y_labels(cols)
+        .x_desc("Features")
+        .y_desc("Features")
+        .label_style(("sans-serif", 15))
+        .axis_desc_style(("sans-serif", 20))
         .draw()?;
 
-    chart.draw_series(
-        trust_scores_2015.iter().zip(happiness_scores_2015.iter()).map(|(&trust, &happiness)| {
-            Circle::new((trust, happiness), 5, BLUE.filled())
-        }),
-    )?.label("2015")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 10, y)], &BLUE));
+    // Add labels for axes (feature names)
+    chart.configure_mesh().x_label_formatter(&|x| {
+        feature_names
+            .get(*x as usize)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string())
+    });
+    chart.configure_mesh().y_label_formatter(&|y| {
+        feature_names
+            .get(*y as usize)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string())
+    });
 
-    chart.draw_series(
-        trust_scores_2016.iter().zip(happiness_scores_2016.iter()).map(|(&trust, &happiness)| {
-            Circle::new((trust, happiness), 5, RED.filled())
-        }),
-    )?.label("2016")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 10, y)], &RED));
-
-    chart.configure_series_labels().background_style(&WHITE.mix(0.8)).draw()?;
-
-    println!("Scatter plot saved to {}", output_file);
-
-    Ok(())
-}
-
-fn create_correlation_heatmap(
-    data: &Array2<f64>,
-    output_file: &str,
-) -> Result<(), Box<dyn Error>> {
-    let correlation_matrix = calculate_correlation_matrix(data);
-    let (rows, cols) = correlation_matrix.dim();
-
-    // Check if the matrix is square
-    if rows != cols {
-        return Err("Correlation matrix is not square.".into());
-    }
-
-    let root = BitMapBackend::new(output_file, (1024, 768)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption("Correlation Heatmap", ("sans-serif", 30))
-        .margin(20)
-        .x_label_area_size(30)
-        .y_label_area_size(30)
-        .build_cartesian_2d(0..cols as u32, 0..rows as u32)?;
-
-    chart.configure_mesh().disable_mesh().draw()?;
-
-    // Draw heatmap cells
-    for i in 0..rows {
+    // Draw heatmap rectangles
+    for i in 0..cols {
         for j in 0..cols {
             let value = correlation_matrix[(i, j)];
             let color = if value >= 0.0 {
@@ -231,7 +175,10 @@ fn create_correlation_heatmap(
                 RGBColor(0, (255.0 * (1.0 + value)) as u8, (255.0 * (-value)) as u8)
             };
             chart.draw_series(std::iter::once(Rectangle::new(
-                [(j as u32, i as u32), (j as u32 + 1, i as u32 + 1)],
+                [
+                    (j as u32, cols as u32 - i as u32 - 1),
+                    ((j + 1) as u32, cols as u32 - i as u32),
+                ],
                 color.filled(),
             )))?;
         }
@@ -240,138 +187,214 @@ fn create_correlation_heatmap(
     println!("Heatmap saved to {}", output_file);
     Ok(())
 }
-fn euclidean_distance(x: &[f64], y: &[f64]) -> f64 {
-    x.iter()
-        .zip(y.iter())
-        .map(|(xi, yi)| (xi - yi).powi(2))
-        .sum::<f64>()
-        .sqrt()
+
+// Helper function to calculate correlation
+fn calculate_correlation(x: &ndarray::ArrayView1<f64>, y: &ndarray::ArrayView1<f64>) -> Option<f64> {
+    let x_mean = x.mean()?;
+    let y_mean = y.mean()?;
+    let numerator = x.iter().zip(y.iter()).map(|(&xi, &yi)| (xi - x_mean) * (yi - y_mean)).sum::<f64>();
+    let denominator_x = x.iter().map(|&xi| (xi - x_mean).powi(2)).sum::<f64>().sqrt();
+    let denominator_y = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>().sqrt();
+    if denominator_x > 0.0 && denominator_y > 0.0 {
+        Some(numerator / (denominator_x * denominator_y))
+    } else {
+        None
+    }
 }
 
-/// Create a similarity graph based on a distance threshold
-fn create_similarity_graph(data: &Array2<f64>, threshold: f64) -> HashMap<usize, Vec<usize>> {
-    let mut graph: HashMap<usize, Vec<usize>> = HashMap::new();
-    let rows = data.shape()[0];
+fn create_scatter_plot(file_path: &str, output_file: &str, income_comp_column: usize, schooling_column: usize) -> Result<(), Box<dyn Error>> {
+    let mut reader = Reader::from_path(file_path)?;
 
-    for i in 0..rows {
-        for j in i + 1..rows {
-            let dist = euclidean_distance(&data.row(i).to_vec(), &data.row(j).to_vec());
-            if dist <= threshold {
-                graph.entry(i).or_insert_with(Vec::new).push(j);
-                graph.entry(j).or_insert_with(Vec::new).push(i);
+    let mut income = Vec::new();
+    let mut schoolings = Vec::new();
+
+    for result in reader.records() {
+        let record = result?;
+
+        if let (Some(income_value), Some(schooling)) = (
+            record.get(income_comp_column),
+            record.get(schooling_column),
+        ) {
+            if let (Ok(income_value), Ok(schooling)) = (
+                income_value.parse::<f64>(),
+                schooling.parse::<f64>(),
+            ) {
+                income.push(income_value);
+                schoolings.push(schooling);
             }
         }
     }
-    graph
-}
 
-/// Use BFS to find connected components (clusters)
-fn bfs_connected_components(graph: &HashMap<usize, Vec<usize>>) -> Vec<HashSet<usize>> {
-    let mut visited = HashSet::new();
-    let mut clusters = Vec::new();
+    let root = BitMapBackend::new(output_file, (1024, 768)).into_drawing_area();
+    root.fill(&WHITE)?;
 
-    for &node in graph.keys() {
-        if !visited.contains(&node) {
-            let mut cluster = HashSet::new();
-            let mut queue = VecDeque::new();
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Income vs. Schooling Rates", ("sans-serif", 30))
+        .margin(20)
+        .x_label_area_size(40)
+        .y_label_area_size(40)
+        .build_cartesian_2d(
+            0.0..income.iter().cloned().fold(f64::NAN, f64::max),
+            0.0..schoolings.iter().cloned().fold(f64::NAN, f64::max),
+        )?;
 
-            queue.push_back(node);
-            while let Some(current) = queue.pop_front() {
-                if visited.insert(current) {
-                    cluster.insert(current);
-                    if let Some(neighbors) = graph.get(&current) {
-                        for &neighbor in neighbors {
-                            if !visited.contains(&neighbor) {
-                                queue.push_back(neighbor);
-                            }
-                        }
-                    }
-                }
-            }
+    chart.configure_mesh()
+        .x_desc("Income")
+        .y_desc("Schooling Rates")
+        .draw()?;
 
-            clusters.push(cluster);
-        }
-    }
-    clusters
-}
+    chart.draw_series(
+        income.iter().zip(schoolings.iter()).map(|(&x, &y)| {
+            Circle::new((x, y), 3, RGBAColor(190, 86, 131, 0.5).filled())
+        }),
+    )?;
 
-/// Analyze connectedness using BFS and clustering
-fn analyze_connectedness(data: &Array2<f64>, threshold: f64) -> Vec<HashSet<usize>> {
-    // Create a similarity graph
-    let graph = create_similarity_graph(data, threshold);
-
-    // Find connected components using BFS
-    let clusters = bfs_connected_components(&graph);
-
-    println!("Number of clusters found: {}", clusters.len());
-    for (i, cluster) in clusters.iter().enumerate() {
-        println!("Cluster {}: {} countries", i + 1, cluster.len());
-    }
-
-    clusters
-}
-fn main() -> Result<(), Box<dyn Error>> {
-    let file_2015 = "./archive/2015.csv";
-    let file_2016 = "./archive/2016.csv";
-
-    // Correct column indices (update based on inspection of CSV)
-    let happiness_index = 3; // Assuming "Happiness Score" is in the 4th column (index 3)
-    let life_expectancy_index = 5; // Assuming "Health (Life Expectancy)" is in the 6th column (index 5)
-
-    // Load CSV data into 2D arrays
-    let data_2015 = load_csv_to_array(file_2015)?;
-    let data_2016 = load_csv_to_array(file_2016)?;
-
-    // Analysis for 2015
-    println!("Analysis for 2015 dataset:");
-    let happiness_column = data_2015.column(happiness_index);
-    let life_expectancy_column_2015 = data_2015.column(life_expectancy_index);
-    let correlation_life_expectancy_2015 = calculate_correlation(&happiness_column, &life_expectancy_column_2015);
-    println!(
-        "Correlation between Happiness and Life Expectancy (2015): {:.2}",
-        correlation_life_expectancy_2015.unwrap_or(0.0)
-    );
-
-    // Analysis for 2016
-    println!("\nAnalysis for 2016 dataset:");
-    let happiness_column_2016 = data_2016.column(happiness_index);
-    let life_expectancy_column_2016 = data_2016.column(life_expectancy_index);
-    let correlation_life_expectancy_2016 = calculate_correlation(&happiness_column_2016, &life_expectancy_column_2016);
-    println!(
-        "Correlation between Happiness and Life Expectancy (2016): {:.2}",
-        correlation_life_expectancy_2016.unwrap_or(0.0)
-    );
-
-    // Find and print top 5 countries
-    find_top_countries(file_2015, happiness_index)?;
-    find_top_countries(file_2016, happiness_index)?;
-
-    // Indices for Freedom and Trust in Government (adjust based on dataset structure)
-    let freedom_index = 5; // Assuming "Freedom" is at index 5
-    let trust_index = 6;   // Assuming "Trust in Government" is at index 6
-
-    // Generate scatter plot
-    create_scatter_plot(file_2015, file_2016, trust_index, happiness_index, "trust_vs_happiness.png")?;
-
-    let labels = vec![
-        "Economy", "Family", "Health", "Freedom", "Trust", "Generosity", "Dystopia Residual"
-    ];
-
-    create_correlation_heatmap(&data_2015, "correlation_heatmap_2015.png")?;
-    create_correlation_heatmap(&data_2016, "correlation_heatmap_2016.png")?;
-
-    // BFS
-    let threshold = 0.5; // Define similarity threshold
-
-    // Load dataset as a 2D array
-    let data_one = load_csv_to_array(file_2015)?;
-    let data_two = load_csv_to_array(file_2016)?;
-
-    // Analyze connectedness
-    println!("Analysis for 2015 dataset:");
-    let clusters_one = analyze_connectedness(&data_one, threshold);
-    println!("Analysis for 2016 dataset:");
-    let clusters_two = analyze_connectedness(&data_two, threshold);
+    println!("Scatter plot saved to {}", output_file);
     Ok(())
 }
 
+// Graph Algorithm
+fn build_similarity_graph(
+    file_path: &str,
+    features: &[usize],
+    threshold: f64, // Similarity threshold
+) -> Result<Graph<String, f64>, Box<dyn std::error::Error>> {
+    let mut reader = csv::Reader::from_path(file_path)?;
+
+    let mut graph = Graph::<String, f64>::new();
+    let mut nodes = Vec::new();
+    let mut feature_data = Vec::new();
+
+    for record in reader.records() {
+        let record = record?;
+        let country = record.get(0).unwrap_or("").to_string();
+        nodes.push(country);
+        let features_row: Vec<f64> = features
+            .iter()
+            .filter_map(|&idx| record.get(idx).and_then(|val| val.parse::<f64>().ok()))
+            .collect();
+        feature_data.push(features_row);
+    }
+
+    // Add nodes to the graph
+    let node_indices: Vec<_> = nodes
+        .iter()
+        .map(|country| graph.add_node(country.clone()))
+        .collect();
+
+    // Calculate pairwise similarity and add edges
+    for i in 0..feature_data.len() {
+        for j in (i + 1)..feature_data.len() {
+            let similarity = calculate_similarity(&feature_data[i], &feature_data[j]);
+            if similarity >= threshold {
+                graph.add_edge(node_indices[i], node_indices[j], similarity);
+            }
+        }
+    }
+
+    Ok(graph)
+}
+
+// Calculate similarity between two feature vectors
+fn calculate_similarity(vec1: &[f64], vec2: &[f64]) -> f64 {
+    let dot_product: f64 = vec1.iter().zip(vec2).map(|(x, y)| x * y).sum();
+    let magnitude1: f64 = vec1.iter().map(|x| x.powi(2)).sum::<f64>().sqrt();
+    let magnitude2: f64 = vec2.iter().map(|x| x.powi(2)).sum::<f64>().sqrt();
+
+    if magnitude1 > 0.0 && magnitude2 > 0.0 {
+        dot_product / (magnitude1 * magnitude2)
+    } else {
+        0.0
+    }
+}
+
+// Perform graph clustering and identify representatives
+fn cluster_graph(graph: &Graph<String, f64>, k: usize) -> HashMap<usize, String> {
+    use petgraph::unionfind::UnionFind;
+
+    // Determine connected components
+    let mut uf = UnionFind::new(graph.node_count());
+    for edge in graph.edge_indices() {
+        let (a, b) = graph.edge_endpoints(edge).unwrap();
+        uf.union(a.index(), b.index());
+    }
+
+    // Map each component to its nodes
+    let mut clusters: HashMap<usize, Vec<NodeIndex>> = HashMap::new();
+    for node in graph.node_indices() {
+        let component_id = uf.find(node.index());
+        clusters.entry(component_id).or_default().push(node);
+    }
+
+    // Select a representative for each cluster
+    let mut representatives = HashMap::new();
+    for (cluster_id, nodes) in clusters {
+        if let Some(representative) = select_representative(&graph, &nodes) {
+            representatives.insert(cluster_id, graph[representative].clone());
+        }
+    }
+
+    representatives
+}
+
+// Select a representative node based on centrality
+fn select_representative(
+    graph: &Graph<String, f64>,
+    nodes: &[NodeIndex],
+) -> Option<NodeIndex> {
+    nodes
+        .iter()
+        .max_by_key(|&&node| graph.edges(node).count())
+        .cloned()
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let file_path = "./Life Expectancy Data.csv";
+
+    // Load CSV data
+    let data = load_csv_to_array(file_path)?;
+    let output_file = "correlation_heatmap.png";
+    let exclude_columns = [0, 1]; // Adjust based on your CSV structure
+
+    // Specify the feature names for labeling
+    let feature_names: Vec<String> = vec![
+        "Adult Mortality", "Infant Deaths", "Alcohol", "Percentage Expenditure",
+        "Measles", "BMI", "Under-Five Deaths", "Polio", "Total Expenditure",
+        "Diphtheria", "Hepatitis B", "HIV/AIDS", "GDP", "Population", "Schooling",
+    ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+    create_correlation_heatmap(file_path, output_file, &exclude_columns, &feature_names)?;
+
+    // To 5 countries
+    let country_column = 0;
+    let year_column = 1;
+    let life_expectancy_column = 3;
+    let income_comp = 20;
+
+    find_top_countries(file_path, country_column, year_column, life_expectancy_column)?;
+
+    let income_comp_column = 20;
+    let schooling_column = 21;
+
+    create_scatter_plot(file_path, "scatter_plot.png", income_comp_column, schooling_column)?;
+
+    // graph
+    let features = vec![3, 16, 17]; // Life expectancy, GDP, and Population columns
+    let threshold = 0.8;
+
+    let graph = build_similarity_graph(file_path, &features, threshold)?;
+
+    // Cluster the graph
+    let k = 5; // Number of desired representatives
+    let representatives = cluster_graph(&graph, k);
+
+    println!("Top {} representatives:", k);
+    for (cluster_id, representative) in representatives {
+        println!("Cluster {}: {}", cluster_id, representative);
+    }
+
+    Ok(())
+}
