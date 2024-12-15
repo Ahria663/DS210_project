@@ -1,13 +1,16 @@
 use ordered_float::NotNan;
 use std::cmp::Reverse;
 use csv::Reader;
-use ndarray::{Array2};
+use ndarray::Array2;
 use plotters::prelude::*;
 use std::error::Error;
 use std::collections::{BinaryHeap, HashMap};
 use std::f64;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::Walker;
+use plotters::prelude::full_palette::PURPLE;
+use plotters::style::full_palette::ORANGE;
+use plotters::prelude::*;
 
 // Load and Clean Data
 fn load_csv_to_array(file_path: &str) -> Result<Array2<f64>, Box<dyn Error>> {
@@ -37,8 +40,6 @@ fn load_csv_to_array(file_path: &str) -> Result<Array2<f64>, Box<dyn Error>> {
 }
 
 // Statistics
-// Chi-square
-
 
 // EDA
 fn find_top_countries(file_path: &str, country_column: usize, year_column: usize, life_expectancy_column: usize) -> Result<(), Box<dyn Error>> {
@@ -309,7 +310,7 @@ fn calculate_similarity(vec1: &[f64], vec2: &[f64]) -> f64 {
 }
 
 // Perform graph clustering and identify representatives
-fn cluster_graph(graph: &Graph<String, f64>, k: usize) -> HashMap<usize, String> {
+fn cluster_graph(graph: &Graph<String, f64>, _k: usize) -> HashMap<usize, String> {
     use petgraph::unionfind::UnionFind;
 
     // Determine connected components
@@ -348,11 +349,49 @@ fn select_representative(
         .cloned()
 }
 
+// Calculate average life expectancy developing vs developed countries
+fn calculate_average_life_expectancy(
+    file_path: &str,
+    country_column: usize,
+    status_column: usize,
+    life_expectancy_column: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mut reader = Reader::from_path(file_path)?;
+
+    let mut totals: HashMap<String, (f64, usize)> = HashMap::new();
+
+    for result in reader.records() {
+        let record = result?;
+        let country_status = record.get(status_column).unwrap_or("").to_string();
+        let life_expectancy = record
+            .get(life_expectancy_column)
+            .unwrap_or("0")
+            .parse::<f64>()
+            .unwrap_or(0.0);
+
+        if !country_status.is_empty() {
+            let entry = totals.entry(country_status).or_insert((0.0, 0));
+            entry.0 += life_expectancy;
+            entry.1 += 1;
+        }
+    }
+
+    for (status, (total_life_expectancy, count)) in totals {
+        let average = total_life_expectancy / count as f64;
+        println!(
+            "Average life expectancy for {} countries: {:.2}",
+            status, average
+        );
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let file_path = "./Life Expectancy Data.csv";
 
     // Load CSV data
-    let data = load_csv_to_array(file_path)?;
+    let _data = load_csv_to_array(file_path)?;
     let output_file = "correlation_heatmap.png";
     let exclude_columns = [0, 1]; // Adjust based on your CSV structure
 
@@ -372,7 +411,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let country_column = 0;
     let year_column = 1;
     let life_expectancy_column = 3;
-    let income_comp = 20;
+    let _income_comp = 20;
 
     find_top_countries(file_path, country_column, year_column, life_expectancy_column)?;
 
@@ -395,6 +434,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (cluster_id, representative) in representatives {
         println!("Cluster {}: {}", cluster_id, representative);
     }
+
+
+    // average life_expectancy vs status
+    let status_column = 2; // Assuming column 2 indicates development status
+    calculate_average_life_expectancy(file_path, country_column, status_column, life_expectancy_column)?;
 
     Ok(())
 }
