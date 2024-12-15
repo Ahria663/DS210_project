@@ -32,7 +32,7 @@ fn load_csv_to_array(file_path: &str) -> Result<Array2<f64>, Box<dyn Error>> {
 
     // Pad rows to the same length
     for row in &mut data {
-        row.resize(max_cols, f64::NAN); // Fill with NaN for missing values
+        row.resize(max_cols, f64::NAN); // Fills in missing values
     }
 
     let rows = data.len();
