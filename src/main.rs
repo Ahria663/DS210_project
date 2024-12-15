@@ -11,7 +11,6 @@ use std::collections::{BinaryHeap, HashMap};
 use std::f64;
 use std::fs::File;
 use petgraph::graph::{Graph, NodeIndex};
-// use pet graph::visit::Walker;
 use std::io::Write;
 
 
@@ -814,29 +813,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         status_column,
         &feature_names,
     )?;
-
-    // let output_file_bar = "developed_illness_bar_plot.png";
-    // let feature_columns_bar = [4, 5, 7, 8, 9, 10, 11];
-    // let feature_names_bar = ["Measles","Polio", "BMI", "Diphtheria", "Hepatitis B", "HIV/AIDS"];
-    //
-    // create_developed_features_bar_plot(
-    //     file_path,
-    //     output_file_bar,
-    //     &feature_columns_bar,
-    //     year_column,
-    //     status_column,
-    //     &feature_names_bar,
-    // )?;
-    //
-    // let output_file_bar_two = "developing_illness_bar_plot.png";
-    // create_developed_features_bar_plot(
-    //     file_path,
-    //     output_file_bar_two,
-    //     &feature_columns_bar,
-    //     year_column,
-    //     status_column,
-    //     &feature_names_bar,
-    // )?;
 
     Ok(())
 }
