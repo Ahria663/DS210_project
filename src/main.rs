@@ -1,3 +1,6 @@
+// Final Project
+
+// imports
 use ordered_float::NotNan;
 use std::cmp::Reverse;
 use csv::Reader;
@@ -6,11 +9,11 @@ use plotters::prelude::*;
 use std::error::Error;
 use std::collections::{BinaryHeap, HashMap};
 use std::f64;
+use std::fs::File;
 use petgraph::graph::{Graph, NodeIndex};
-use petgraph::visit::Walker;
-use plotters::prelude::full_palette::PURPLE;
-use plotters::style::full_palette::ORANGE;
-use plotters::prelude::*;
+// use pet graph::visit::Walker;
+use std::io::Write;
+
 
 // Load and Clean Data
 fn load_csv_to_array(file_path: &str) -> Result<Array2<f64>, Box<dyn Error>> {
@@ -39,9 +42,7 @@ fn load_csv_to_array(file_path: &str) -> Result<Array2<f64>, Box<dyn Error>> {
     Ok(Array2::from_shape_vec((rows, cols), flat_data)?)
 }
 
-// Statistics
-
-// EDA
+// EDA + Statistics
 fn find_top_countries(file_path: &str, country_column: usize, year_column: usize, life_expectancy_column: usize) -> Result<(), Box<dyn Error>> {
     let mut reader = Reader::from_path(file_path)?;
 
@@ -108,7 +109,6 @@ fn create_correlation_heatmap(
         data_matrix.push(row);
     }
 
-    // Convert to ndarray for processing
     let data = Array2::from_shape_vec(
         (data_matrix.len(), data_matrix[0].len()),
         data_matrix.into_iter().flatten().collect(),
@@ -130,7 +130,6 @@ fn create_correlation_heatmap(
         }
     }
 
-    // Set up the drawing area
     let root = BitMapBackend::new(output_file, (1024, 1024)).into_drawing_area();
     root.fill(&WHITE)?;
 
@@ -349,10 +348,40 @@ fn select_representative(
         .cloned()
 }
 
+// Visualize Graph Algorithm
+fn export_graph_to_csv(
+    graph: &Graph<String, f64>,
+    output_file: &str,
+) -> Result<(), Box<dyn Error>> {
+    // Open the output file for writing
+    let mut file = File::create(output_file)?;
+
+    // Write the CSV header
+    writeln!(file, "Source,Target,Weight")?;
+
+    // Iterate over the edges in the graph
+    for edge in graph.edge_indices() {
+        let (source, target) = graph.edge_endpoints(edge).unwrap();
+        let weight = graph.edge_weight(edge).unwrap();
+
+        // Write each edge as a row in the CSV file
+        writeln!(
+            file,
+            "{}, {}, {:.6}",
+            graph[source],
+            graph[target],
+            weight
+        )?;
+    }
+
+    Ok(())
+}
+
+
 // Calculate average life expectancy developing vs developed countries
 fn calculate_average_life_expectancy(
     file_path: &str,
-    country_column: usize,
+    _country_column: usize,
     status_column: usize,
     life_expectancy_column: usize,
 ) -> Result<(), Box<dyn Error>> {
@@ -386,6 +415,302 @@ fn calculate_average_life_expectancy(
 
     Ok(())
 }
+
+fn create_developed_vs_developing_plot(
+    file_path: &str,
+    output_file: &str,
+    feature_column: usize,
+    year_column: usize,
+    status_column: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path(file_path)?;
+
+    let mut data: HashMap<(String, String), Vec<f64>> = HashMap::new();
+
+    for record in reader.records() {
+        let record = record?;
+        let year = record.get(year_column).unwrap_or("").to_string();
+        let status = record.get(status_column).unwrap_or("").to_string();
+        let feature_value: f64 = record
+            .get(feature_column)
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0.0);
+
+        data.entry((year, status))
+            .or_insert_with(Vec::new)
+            .push(feature_value);
+    }
+
+    let mut averages: HashMap<(String, String), f64> = HashMap::new();
+    for ((year, status), values) in data {
+        let avg = values.iter().copied().sum::<f64>() / values.len() as f64;
+        averages.insert((year.clone(), status.clone()), avg);
+    }
+
+    let mut years: Vec<String> = averages.keys().map(|(year, _)| year.clone()).collect();
+    years.sort();
+    let mut developed = Vec::new();
+    let mut developing = Vec::new();
+
+    for year in &years {
+        developed.push(averages.get(&(year.clone(), "Developed".to_string())).copied().unwrap_or(0.0));
+        developing.push(averages.get(&(year.clone(), "Developing".to_string())).copied().unwrap_or(0.0));
+    }
+
+    let root = BitMapBackend::new(output_file, (1280, 720)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Developed vs Developing Adult Mortality Averages per Year ", ("sans-serif", 40))
+        .margin(10)
+        .x_label_area_size(50)
+        .y_label_area_size(50)
+        .build_cartesian_2d(0..years.len() as u32, 0.0..250.0)?;
+
+    chart.configure_mesh()
+        .x_labels(years.len())
+        .y_desc("Adult Mortality Averages ")
+        .x_desc("Years")
+        .axis_desc_style(("sans-serif", 20))
+        .label_style(("sans-serif", 15))
+        .x_label_formatter(&|x| years.get(*x as usize).unwrap_or(&"".to_string()).clone())
+        .draw()?;
+
+    chart.draw_series(LineSeries::new(
+        (0..developed.len()).map(|x| x as u32).zip(developed.iter().copied()),
+        &RED,
+    ))?
+        .label("Developed")
+        .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], &RED));
+
+    chart.draw_series(LineSeries::new(
+        (0..developing.len()).map(|x| x as u32).zip(developing.iter().copied()),
+        &BLUE,
+    ))?
+        .label("Developing")
+        .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], &BLUE));
+
+    chart
+        .configure_series_labels()
+        .background_style(&WHITE)
+        .border_style(&BLACK)
+        .draw()?;
+
+    Ok(())
+}
+// same code as the one above, differences in the chart size, Y-axis view
+fn create_developed_vs_developing_plot_infant(
+    file_path: &str,
+    output_file: &str,
+    feature_column: usize,
+    year_column: usize,
+    status_column: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path(file_path)?;
+
+    let mut data: HashMap<(String, String), Vec<f64>> = HashMap::new();
+
+    for record in reader.records() {
+        let record = record?;
+        let year = record.get(year_column).unwrap_or("").to_string();
+        let status = record.get(status_column).unwrap_or("").to_string();
+        let feature_value: f64 = record
+            .get(feature_column)
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0.0);
+
+        data.entry((year, status))
+            .or_insert_with(Vec::new)
+            .push(feature_value);
+    }
+
+    let mut averages: HashMap<(String, String), f64> = HashMap::new();
+    for ((year, status), values) in data {
+        let avg = values.iter().copied().sum::<f64>() / values.len() as f64;
+        averages.insert((year.clone(), status.clone()), avg);
+    }
+
+    let mut years: Vec<String> = averages.keys().map(|(year, _)| year.clone()).collect();
+    years.sort();
+    let mut developed = Vec::new();
+    let mut developing = Vec::new();
+
+    for year in &years {
+        developed.push(averages.get(&(year.clone(), "Developed".to_string())).copied().unwrap_or(0.0));
+        developing.push(averages.get(&(year.clone(), "Developing".to_string())).copied().unwrap_or(0.0));
+    }
+
+    let root = BitMapBackend::new(output_file, (1280, 720)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Developed vs Developing Infant Mortality Averages per Year ", ("sans-serif", 40))
+        .margin(10)
+        .x_label_area_size(50)
+        .y_label_area_size(50)
+        .build_cartesian_2d(0..years.len() as u32, 0.0..50.0)?;
+
+    chart.configure_mesh()
+        .x_labels(years.len())
+        .y_desc("Infant Mortality Averages ")
+        .x_desc("Years")
+        .axis_desc_style(("sans-serif", 20))
+        .label_style(("sans-serif", 15))
+        .x_label_formatter(&|x| years.get(*x as usize).unwrap_or(&"".to_string()).clone())
+        .draw()?;
+
+    chart.draw_series(LineSeries::new(
+        (0..developed.len()).map(|x| x as u32).zip(developed.iter().copied()),
+        &RED,
+    ))?
+        .label("Developed")
+        .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], &RED));
+
+    chart.draw_series(LineSeries::new(
+        (0..developing.len()).map(|x| x as u32).zip(developing.iter().copied()),
+        &BLUE,
+    ))?
+        .label("Developing")
+        .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], &BLUE));
+
+    chart
+        .configure_series_labels()
+        .background_style(&WHITE)
+        .border_style(&BLACK)
+        .draw()?;
+
+    Ok(())
+}
+
+fn create_features_comparison_bar_plot(
+    file_path: &str,
+    output_file: &str,
+    feature_columns: &[usize],
+    _year_column: usize,
+    status_column: usize,
+    feature_names: &[&str],
+) -> Result<(), Box<dyn Error>> {
+    let mut reader = csv::Reader::from_path(file_path)?;
+
+    let mut data: HashMap<(String, String), Vec<f64>> = HashMap::new();
+
+    for record in reader.records() {
+        let record = record?;
+        let status = record.get(status_column).unwrap_or("").to_string();
+
+        for (&col, &feature_name) in feature_columns.iter().zip(feature_names.iter()) {
+            let feature_value: f64 = record
+                .get(col)
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0.0);
+
+            data.entry((feature_name.to_string(), status.clone()))
+                .or_insert_with(Vec::new)
+                .push(feature_value);
+        }
+    }
+
+    let averages: HashMap<(String, String), f64> = data
+        .into_iter()
+        .map(|((feature, status), values)| {
+            let avg = values.iter().copied().sum::<f64>() / values.len() as f64;
+            ((feature, status), avg)
+        })
+        .collect();
+
+    let developed_averages: Vec<f64> = feature_names
+        .iter()
+        .map(|&name| *averages.get(&(name.to_string(), "Developed".to_string())).unwrap_or(&0.0))
+        .collect();
+
+    let developing_averages: Vec<f64> = feature_names
+        .iter()
+        .map(|&name| *averages.get(&(name.to_string(), "Developing".to_string())).unwrap_or(&0.0))
+        .collect();
+
+    let root = BitMapBackend::new(output_file, (1280, 720)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let max_avg = developed_averages
+        .iter()
+        .chain(developing_averages.iter())
+        .cloned()
+        .fold(0.0 / 0.0, f64::max);
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Comparison of Features Between Developed and Developing Countries", ("sans-serif", 40))
+        .margin(10)
+        .x_label_area_size(50)
+        .y_label_area_size(50)
+        .build_cartesian_2d(0..(feature_names.len() as i32 * 2), 0.0..(max_avg * 1.2))?;
+
+    chart
+        .configure_mesh()
+        .x_labels(feature_names.len() * 2)
+        .y_desc("Average")
+        .x_desc("Features")
+        .axis_desc_style(("sans-serif", 20))
+        .label_style(("sans-serif", 15))
+        .x_label_formatter(&|x| {
+            let index = (*x as usize) / 2;
+            feature_names.get(index).unwrap_or(&"").to_string()
+        })
+        .draw()?;
+
+    // Plot Developed
+    chart.draw_series(developed_averages.iter().enumerate().map(|(i, avg)| {
+        Rectangle::new(
+            [(i as i32 * 2, 0.0), (i as i32 * 2 + 1, *avg)],
+            ShapeStyle {
+                color: RGBAColor(190, 86, 131, 1f64), // #A5CBC3 for Developing
+                filled: true,
+                stroke_width: 0,
+            },
+        )
+    }))?
+        .label("Developed")
+        .legend(|(x, y)| Rectangle::new(
+            [(x, y - 5), (x + 10, y + 5)],
+            ShapeStyle {
+                color: RGBAColor(190, 86, 131, 1f64), // #A5CBC3 for Developing
+                filled: true,
+                stroke_width: 0,
+            },
+        ));
+
+    // Plot Developing
+    chart.draw_series(developing_averages.iter().enumerate().map(|(i, avg)| {
+        Rectangle::new(
+            [(i as i32 * 2 + 1, 0.0), (i as i32 * 2 + 2, *avg)],
+            ShapeStyle {
+                color: RGBAColor(110, 48, 75, 1f64),
+                filled: true,
+                stroke_width: 0,
+            },
+        )
+    }))?
+        .label("Developing")
+        .legend(|(x, y)| Rectangle::new(
+            [(x, y - 5), (x + 10, y + 5)],
+            ShapeStyle {
+                color: RGBAColor(110, 48, 75, 1f64),
+                filled: true,
+                stroke_width: 0,
+            },));
+
+    chart
+        .configure_series_labels()
+        .label_font(("sans-serif", 15))
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()?;
+
+    Ok(())
+}
+
 
 fn main() -> Result<(), Box<dyn Error>> {
     let file_path = "./Life Expectancy Data.csv";
@@ -426,6 +751,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let graph = build_similarity_graph(file_path, &features, threshold)?;
 
+    // visualize clusters
+    let output_file = "graph_edge_list.csv";
+    export_graph_to_csv(&graph, output_file)?;
+
+    println!("Edge list exported to {}", output_file);
+
     // Cluster the graph
     let k = 5; // Number of desired representatives
     let representatives = cluster_graph(&graph, k);
@@ -439,6 +770,73 @@ fn main() -> Result<(), Box<dyn Error>> {
     // average life_expectancy vs status
     let status_column = 2; // Assuming column 2 indicates development status
     calculate_average_life_expectancy(file_path, country_column, status_column, life_expectancy_column)?;
+
+    // plot developed vs developing across Adult Mortality
+
+    let output_file_feature = "developed_vs_developing_plot_adult_mortality.png"; // Output file for the plot
+
+    // Specify the column indices
+    let feature_column = 4; // The column index of Adult Mortality
+    let year_column = 1; // The column index of the year
+    let status_column = 2; // The column index indicating "Developed" or "Developing"
+
+    // Call the function
+    create_developed_vs_developing_plot(
+        file_path,
+        output_file_feature,
+        feature_column,
+        year_column,
+        status_column,
+    )?;
+
+    // plot developed vs developing across Infant Mortality
+
+    let output_file_feature_two = "developed_vs_developing_plot_infant_mortality.png";
+    let feature_column_two = 5; // The column index of Infant Mortality
+    create_developed_vs_developing_plot_infant(
+        file_path,
+        output_file_feature_two,
+        feature_column_two,
+        year_column,
+        status_column,
+
+    )?;
+
+    let output_file = "comparison_bar_plot.png";
+    let feature_columns = [4, 5, 7, 8, 9, 10, 11];
+    let feature_names = ["Measles", "Polio", "BMI", "Diphtheria", "Hepatitis B", "HIV/AIDS"];
+
+    create_features_comparison_bar_plot(
+        file_path,
+        output_file,
+        &feature_columns,
+        year_column,
+        status_column,
+        &feature_names,
+    )?;
+
+    // let output_file_bar = "developed_illness_bar_plot.png";
+    // let feature_columns_bar = [4, 5, 7, 8, 9, 10, 11];
+    // let feature_names_bar = ["Measles","Polio", "BMI", "Diphtheria", "Hepatitis B", "HIV/AIDS"];
+    //
+    // create_developed_features_bar_plot(
+    //     file_path,
+    //     output_file_bar,
+    //     &feature_columns_bar,
+    //     year_column,
+    //     status_column,
+    //     &feature_names_bar,
+    // )?;
+    //
+    // let output_file_bar_two = "developing_illness_bar_plot.png";
+    // create_developed_features_bar_plot(
+    //     file_path,
+    //     output_file_bar_two,
+    //     &feature_columns_bar,
+    //     year_column,
+    //     status_column,
+    //     &feature_names_bar,
+    // )?;
 
     Ok(())
 }
